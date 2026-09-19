@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Guitar Remover
+GenericName=Backing Track Maker
+Comment=Make guitar backing tracks from any song, on your own computer
+Exec=guitar-remover %F
+Icon=guitar-remover
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+MimeType=audio/mpeg;audio/x-wav;audio/wav;audio/flac;audio/x-flac;audio/mp4;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/aac;audio/x-aiff;
+StartupWMClass=guitar-remover
+Keywords=guitar;backing track;stems;demucs;karaoke;

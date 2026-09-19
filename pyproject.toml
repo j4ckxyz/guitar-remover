@@ -1,0 +1,34 @@
+[project]
+name = "guitar-remover"
+version = "1.0.0"
+description = "Make guitar backing tracks from any song, locally, with Demucs."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+dependencies = [
+    "torch>=2.4",
+    "demucs>=4.1",
+    "PySide6-Essentials>=6.8",
+    "numpy",
+    "soundfile",
+    "psutil",
+    "imageio-ffmpeg",
+    "huggingface_hub",
+    "httpx",
+    "safetensors",
+    "pyyaml",
+    "sounddevice",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pyflakes", "pyinstaller>=6.10"]
+
+[project.gui-scripts]
+guitar-remover = "guitar_remover.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

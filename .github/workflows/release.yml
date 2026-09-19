@@ -1,0 +1,64 @@
+# Builds the macOS, Windows and Linux apps and attaches them to a GitHub release.
+# Trigger: push a tag like v1.0.0  (git tag v1.0.0 && git push --tags)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple Silicon
+            asset: Guitar-Remover-macOS-arm64.dmg
+          - os: windows-latest
+            asset: Guitar-Remover-Windows-x64.zip
+          - os: ubuntu-22.04      # older glibc = runs on more distros
+            asset: Guitar-Remover-Linux-x86_64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libxcb-cursor0 libegl1
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: PYTHON=python packaging/build_macos.sh
+
+      - name: Build (Windows, CPU; CUDA builds exceed GitHub's 2 GB asset limit)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          ./packaging/build_windows.ps1 -Cpu
+
+      - name: Build (Linux, CPU)
+        if: runner.os == 'Linux'
+        run: PYTHON=python packaging/build_linux.sh
+
+      - name: Smoke test (imports, hardware detection)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            macOS) EXE="packaging/dist/Guitar Remover.app/Contents/MacOS/GuitarRemover" ;;
+            Windows) EXE="packaging/dist/GuitarRemover/GuitarRemover.exe" ;;
+            Linux) EXE="packaging/dist/GuitarRemover/GuitarRemover" ;;
+          esac
+          "$EXE" --export-icon smoke.png && test -s smoke.png
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/dist/${{ matrix.asset }}
+          generate_release_notes: true

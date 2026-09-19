@@ -1,0 +1,15 @@
+# NVIDIA GPU on Windows: install the CUDA build of PyTorch first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Linux: playback needs PortAudio (sudo apt install libportaudio2).
+torch>=2.4
+demucs>=4.1
+PySide6-Essentials>=6.8
+numpy
+soundfile
+psutil
+imageio-ffmpeg
+huggingface_hub
+httpx
+safetensors
+pyyaml
+sounddevice
