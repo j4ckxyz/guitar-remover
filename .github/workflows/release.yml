@@ -1,19 +1,56 @@
-# Builds the macOS, Windows and Linux apps and attaches them to a GitHub release.
-# Trigger: push a tag like v1.0.0  (git tag v1.0.0 && git push --tags)
+# Every push to main is a release.
+#
+# 1. check:   the version in src/guitar_remover/__init__.py must be new (higher than
+#             every vX.Y.Z tag) and have a CHANGELOG.md section; lint and tests pass.
+# 2. build:   macOS, Windows and Linux apps are built with that version.
+# 3. release: tag vX.Y.Z is created on the pushed commit and the apps are attached,
+#             with the CHANGELOG.md section as the release notes.
+#
+# Pull requests run the check only, so a missing version bump shows up before merging.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  check:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # all tags, for the version comparison
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Version must be new and in CHANGELOG.md
+        id: version
+        run: python tools/check_version.py
+      - name: Lint and tests
+        run: |
+          sudo apt-get update && sudo apt-get install -y libegl1 libxcb-cursor0
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q -r requirements.txt pytest pyflakes
+          python -m pyflakes src tests tools packaging/*.py
+          QT_QPA_PLATFORM=offscreen python -m pytest tests -q
+
   build:
+    needs: check
+    if: github.event_name != 'pull_request'
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - os: macos-14          # Apple Silicon
@@ -48,17 +85,49 @@ jobs:
         if: runner.os == 'Linux'
         run: PYTHON=python packaging/build_linux.sh
 
-      - name: Smoke test (imports, hardware detection)
+      - name: Smoke test the built app
         shell: bash
         run: |
           case "$RUNNER_OS" in
             macOS) EXE="packaging/dist/Guitar Remover.app/Contents/MacOS/GuitarRemover" ;;
             Windows) EXE="packaging/dist/GuitarRemover/GuitarRemover.exe" ;;
-            Linux) EXE="packaging/dist/GuitarRemover/GuitarRemover" ;;
+            Linux) EXE="packaging/dist/GuitarRemover/GuitarRemover"; export QT_QPA_PLATFORM=offscreen ;;
           esac
           "$EXE" --export-icon smoke.png && test -s smoke.png
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: packaging/dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [check, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' CHANGELOG.md > notes.md
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
-          files: packaging/dist/${{ matrix.asset }}
-          generate_release_notes: true
+          tag_name: v${{ needs.check.outputs.version }}
+          name: Guitar Remover ${{ needs.check.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: notes.md
+          files: assets/*
+          fail_on_unmatched_files: true
+          make_latest: true

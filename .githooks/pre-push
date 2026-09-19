@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# Blocks pushes to main that don't carry a new, unreleased version.
+# Enable once per clone:  git config core.hooksPath .githooks
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    PY=$(command -v python3 || command -v python)
+    "$PY" tools/check_version.py --remote >/dev/null || exit 1
+  fi
+done
+exit 0

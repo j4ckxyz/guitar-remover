@@ -1,6 +1,6 @@
 [project]
 name = "guitar-remover"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Make guitar backing tracks from any song, locally, with Demucs."
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -29,6 +29,9 @@ guitar-remover = "guitar_remover.app:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "guitar_remover.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

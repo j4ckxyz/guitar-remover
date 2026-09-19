@@ -252,8 +252,11 @@ uv venv -p 3.12 && uv pip install --torch-backend auto -e .
 | Windows | `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 [-Cpu]` | `GuitarRemover.exe` folder and a `.zip` |
 | Linux | `packaging/build_linux.sh [--cuda]` | `GuitarRemover` folder and a `.tar.gz` |
 
-To publish a release, push a version tag (`git tag v1.0.0 && git push --tags`), and
-[the release workflow](.github/workflows/release.yml) builds all three and attaches them.
+Every push to `main` is a release. Bump `__version__` in `src/guitar_remover/__init__.py`
+and add a matching section to [CHANGELOG.md](CHANGELOG.md), and
+[the release workflow](.github/workflows/release.yml) builds all three apps, tags `vX.Y.Z`
+and publishes them. Pushes without a new version are rejected; see [AGENTS.md](AGENTS.md).
+Run `git config core.hooksPath .githooks` once so the check also runs before each push.
 
 Windows and Linux releases are CPU builds, because CUDA builds are larger than GitHub's
 2 GB file limit. GPU users get CUDA through the one-command install instead.
@@ -284,6 +287,7 @@ src/guitar_remover/
   app.py         entry point, platform styling, --selftest
   ui/            main window, player, settings, widgets, icon
 packaging/       PyInstaller spec, build scripts, Linux desktop entry
+tools/           check_version.py, the release version gate
 install.sh       one-command installer for macOS and Linux
 install.ps1      one-command installer for Windows
 ```
