@@ -42,6 +42,11 @@ DEFAULTS: dict[str, object] = {
     "threads": 0,
     "models_dir": "",
     "keep_tags": True,
+    "cache_gb": 3,  # space for remembered separations; 0 turns it off
+    "cache_dir": "",
+    "update_mode": "ask",  # "ask" | "auto" | "off"
+    "update_last_check": 0.0,
+    "update_skip": "",
 }
 
 
@@ -80,6 +85,15 @@ class Settings:
     @property
     def output_dir(self) -> Path:
         return Path(self.get("output_dir") or default_output_dir())
+
+    @property
+    def cache_dir(self) -> Path:
+        from .stem_cache import default_cache_dir
+        return Path(self.get("cache_dir") or default_cache_dir())
+
+    def stem_cache(self):
+        from .stem_cache import GB, StemCache
+        return StemCache(self.cache_dir, int(self.get("cache_gb") * GB))
 
     @property
     def models_dir(self) -> Path:

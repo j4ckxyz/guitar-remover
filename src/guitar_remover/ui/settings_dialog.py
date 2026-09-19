@@ -138,6 +138,14 @@ class SettingsDialog(QDialog):
         done.addWidget(self.open_player)
         done.addWidget(self.reveal)
         form.addRow("When done:", done)
+
+        self.update_mode = QComboBox()
+        self.update_mode.addItem("Check automatically and ask", "ask")
+        self.update_mode.addItem("Install automatically when I quit", "auto")
+        self.update_mode.addItem("Don't check", "off")
+        self.update_mode.currentIndexChanged.connect(
+            lambda: self.s.set("update_mode", self.update_mode.currentData()))
+        form.addRow("Updates:", self.update_mode)
         return w
 
     def _performance_tab(self) -> QWidget:
@@ -158,6 +166,26 @@ class SettingsDialog(QDialog):
         lay.addWidget(self.use_gpu)
         lay.addWidget(_hint("Much faster on Apple Silicon Macs and on NVIDIA (or, on Linux, "
                             "AMD ROCm) graphics cards."))
+        lay.addSpacing(8)
+
+        store = QGroupBox("Remembered songs")
+        sl = QVBoxLayout(store)
+        row = QHBoxLayout()
+        self.cache_size = QComboBox()
+        for label, gb in [("Off", 0), ("1 GB (about 7 songs)", 1), ("3 GB (about 20 songs)", 3),
+                          ("10 GB (about 70 songs)", 10), ("30 GB (about 200 songs)", 30)]:
+            self.cache_size.addItem(label, gb)
+        self.cache_size.currentIndexChanged.connect(self._cache_size_changed)
+        self.cache_clear = QPushButton("Clear…")
+        self.cache_clear.clicked.connect(self._clear_cache)
+        row.addWidget(QLabel("Space to use:"))
+        row.addWidget(self.cache_size)
+        row.addStretch(1)
+        row.addWidget(self.cache_clear)
+        sl.addLayout(row)
+        self.cache_info = _hint("")
+        sl.addWidget(self.cache_info)
+        lay.addWidget(store)
         lay.addSpacing(8)
 
         grp = QGroupBox("This computer")
@@ -320,7 +348,8 @@ class SettingsDialog(QDialog):
         widgets = [self.next_to, self.per_song, self.fmt, self.keep_vocals, self.no_vocals,
                    self.reveal, self.open_player, self.power.slider, self.use_gpu, self.model, self.stem,
                    self.custom_quality, self.shifts, self.overlap, self.segment, self.method,
-                   self.clip, self.stems, self.tags, self.device, self.threads]
+                   self.clip, self.stems, self.tags, self.device, self.threads,
+                   self.cache_size, self.update_mode]
         for wd in widgets:
             wd.blockSignals(True)
         self.out_edit.setText(str(s.output_dir))
@@ -352,10 +381,13 @@ class SettingsDialog(QDialog):
         self._select(self.device, s.get("device"))
         self.threads.setValue(s.get("threads"))
         self.models_dir.setText(str(s.models_dir))
+        self._select(self.cache_size, s.get("cache_gb"))
+        self._select(self.update_mode, s.get("update_mode"))
         for wd in widgets:
             wd.blockSignals(False)
         self._power_changed(self.power.value(), save=False)
         self._model_changed(save=False)
+        self._refresh_cache_info()
 
     @staticmethod
     def _select(combo: QComboBox, data):
@@ -496,6 +528,30 @@ class SettingsDialog(QDialog):
             self.s.set("models_dir", d)
             self.models_dir.setText(d)
             self._refresh_dl()
+
+    def _refresh_cache_info(self):
+        used = self.s.stem_cache().size()
+        self.cache_clear.setEnabled(used > 0)
+        self.cache_info.setText(
+            "Songs you've separated are kept (every part, as lossless FLAC), so changing "
+            "the format or vocal setting, or saving a song again, takes seconds. "
+            f"Using {used / 1e6:.0f} MB. The oldest songs are removed when it's full.")
+
+    def _cache_size_changed(self, *_):
+        self.s.set("cache_gb", self.cache_size.currentData())
+        self.s.stem_cache().evict()
+        self._refresh_cache_info()
+
+    def _clear_cache(self):
+        ans = QMessageBox.question(
+            self, "Forget remembered songs?",
+            "Songs will need to be separated again next time. Your saved backing tracks "
+            "are not affected.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel)
+        if ans == QMessageBox.StandardButton.Yes:
+            self.s.stem_cache().clear()
+            self._refresh_cache_info()
 
     def _reset(self):
         ans = QMessageBox.question(

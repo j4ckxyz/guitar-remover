@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import math
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ import numpy as np
 from . import audio_io, models
 from .hardware import ResourcePlan, set_low_priority
 from .models import Cancelled
+from .stem_cache import StemCache, make_key
 
 # Speed-vs-quality slider positions -> (shifts, overlap, label, blurb)
 QUALITY_PRESETS = [
@@ -57,6 +59,8 @@ class JobResult:
     separate_seconds: float  # model time only, for speed estimates
     device: str
     notes: list[str]
+    cached: bool = False  # separation came from the cache (no model run)
+    cache_key: str | None = None
 
 
 ProgressFn = Callable[[str, float], None]  # (stage text, 0..1 or -1 for busy)
@@ -95,122 +99,162 @@ class Separator:
 
     # -- the actual work -------------------------------------------------
     def run(self, src: Path, cfg: JobConfig, plan: ResourcePlan,
-            progress: ProgressFn, cancel: threading.Event) -> JobResult:
-        import torch
-
+            progress: ProgressFn, cancel: threading.Event,
+            cache: StemCache | None = None) -> JobResult:
         with self._lock:
             t0 = time.monotonic()
-            set_low_priority(plan.low_priority)
-            torch.set_num_threads(plan.threads)
             notes = list(plan.notes)
-
-            model = self.ensure_model(cfg.model_ref, progress, cancel)
-            sources = list(model.sources)
-            target = cfg.target_stem
-            if target == "auto":
-                target = "guitar" if "guitar" in sources else "other"
-            if target not in sources:
-                raise RuntimeError(f"This model has no '{target}' stem "
-                                   f"(it has: {', '.join(sources)}).")
-            removed = {target, *[s for s in cfg.also_remove if s in sources]}
+            key = None
+            if cache is not None and cache.enabled:
+                progress("Checking for a saved separation…", -1)
+                key = make_key(src, cfg.model_ref, cfg.shifts, cfg.overlap, plan.segment)
+            hit = cache.get(key) if key else None
 
             progress("Reading audio…", -1)
             if cancel.is_set():
                 raise Cancelled()
-            mix_np = audio_io.decode(src, model.samplerate, model.audio_channels)
-            tags = audio_io.read_tags(src) if cfg.keep_tags else {}
-            length = mix_np.shape[1]
-            audio_seconds = length / model.samplerate
-            if length < model.samplerate // 10:
-                raise RuntimeError("This file is too short to separate.")
-
-            mix = torch.from_numpy(mix_np)
-            ref = mix.mean(0)
-            mean, std = float(ref.mean()), float(ref.std()) or 1.0
-            mix = ((mix - mean) / std)[None]  # (1, C, T), stays on CPU
-
-            want_stems = sources if cfg.export_stems else []
-            device = plan.device
-            t_sep = time.monotonic()
-            try:
-                outs = self._separate(model, mix, sources, target, removed, want_stems,
-                                      cfg, plan, device, progress, cancel)
-            except (Cancelled, MemoryError):
-                raise
-            except RuntimeError as exc:
-                if device == "cpu" or "out of memory" in str(exc).lower() and device == "cuda":
-                    raise
-                # Some GPUs/drivers lack an op: retry on the CPU instead of failing.
-                notes.append(f"GPU failed ({str(exc).splitlines()[0][:80]}), used CPU instead.")
-                device = "cpu"
-                _free_memory()
-                outs = self._separate(model, mix, sources, target, removed, want_stems,
-                                      cfg, plan, device, progress, cancel)
-            del mix
-            t_sep = time.monotonic() - t_sep
-            progress("Saving…", -1)
-
-            # Undo normalisation.
-            for k in outs:
-                outs[k] = outs[k] * std + mean
-            guitar = outs.pop("_guitar")
-            if cfg.backing_method == "residual":
-                backing = mix_np - guitar
-                for s in removed - {target}:
-                    backing -= outs.get(f"_rm_{s}", 0)
+            tmp = tempfile.TemporaryDirectory(prefix="guitar-remover-")
+            if hit:
+                sr, sources = hit["samplerate"], hit["sources"]
+                mix_np = audio_io.decode(src, sr, 2)
+                stems = hit["stems"]
+                device, t_sep = "cache", 0.0
+                notes.append("Used the saved separation, so no processing was needed.")
             else:
-                backing = outs.pop("_backing")
-            for k in [k for k in outs if k.startswith("_rm_")]:
-                outs.pop(k)
+                try:
+                    stems, mix_np, sr, sources, device, t_sep = self._run_model(
+                        src, cfg, plan, progress, cancel, notes, Path(tmp.name))
+                except BaseException:
+                    tmp.cleanup()
+                    raise
+            try:
+                target = cfg.target_stem
+                if target == "auto":
+                    target = "guitar" if "guitar" in sources else "other"
+                if target not in sources:
+                    raise RuntimeError(f"This model has no '{target}' part "
+                                       f"(it has: {', '.join(sources)}).")
+                if key and not hit:
+                    progress("Remembering this separation…", -1)
+                    try:
+                        cache.put(key, sr, stems, {"song": src.name, "model": cfg.model_ref})
+                    except OSError as exc:  # e.g. disk full: not worth failing the job
+                        notes.append(f"Couldn't save the separation for later: {exc}")
+                if cancel.is_set():
+                    raise Cancelled()
+                progress("Saving…", -1)
+                paths = self._write_outputs(src, cfg, stems, mix_np, sr, target, notes)
+            finally:
+                del stems
+                tmp.cleanup()
+                _free_memory()
+                set_low_priority(False)
+            g_path, b_path, stem_paths, folder = paths
+            return JobResult(g_path, b_path, stem_paths, folder, time.monotonic() - t0,
+                             mix_np.shape[1] / sr, t_sep, device, notes,
+                             cached=bool(hit), cache_key=key)
 
-            # Keep guitar + backing at matched levels so they still add up.
-            tracks = {"guitar": guitar, "backing": backing, **outs}
-            if cfg.clip_mode == "shared_gain" and cfg.fmt != "wav32f":
-                peak = max(float(np.abs(a).max()) for a in tracks.values())
-                if peak > 0.999:
-                    gain = 0.999 / peak
-                    for a in tracks.values():
-                        a *= gain
-                    notes.append(f"Lowered volume by {-20 * math.log10(gain):.1f} dB "
-                                 "to avoid clipping.")
-            elif cfg.clip_mode == "clamp":
-                for a in tracks.values():
-                    np.clip(a, -1, 1, out=a)
+    def _run_model(self, src, cfg, plan, progress, cancel, notes, tmp: Path):
+        import torch
 
-            song = audio_io.safe_filename(src.stem)
-            folder = Path(cfg.output_dir)
-            if cfg.folder_per_song:
-                folder = folder / song
-            sr = model.samplerate
+        set_low_priority(plan.low_priority)
+        torch.set_num_threads(plan.threads)
+        model = self.ensure_model(cfg.model_ref, progress, cancel)
+        sources = list(model.sources)
+        progress("Reading audio…", -1)
+        mix_np = audio_io.decode(src, model.samplerate, model.audio_channels)
+        length = mix_np.shape[1]
+        if length < model.samplerate // 10:
+            raise RuntimeError("This file is too short to separate.")
 
-            def tagged(suffix: str) -> dict[str, str]:
-                if not tags:
-                    return {}
-                t = dict(tags)
-                t["title"] = f"{tags.get('title', song)} ({suffix})"
-                return t
+        mix = torch.from_numpy(mix_np)
+        ref = mix.mean(0)
+        mean, std = float(ref.mean()), float(ref.std()) or 1.0
+        mix = ((mix - mean) / std)[None]  # (1, C, T), stays on CPU
 
-            guitar_label = "Guitar" if target == "guitar" else target.title()
-            backing_label = "Backing Track" + (" (no vocals)" if "vocals" in removed else "")
-            g_path = audio_io.write(folder / f"{song} - {guitar_label}", guitar, sr, cfg.fmt,
-                                    tagged(guitar_label))
-            b_path = audio_io.write(folder / f"{song} - {backing_label}", backing, sr, cfg.fmt,
-                                    tagged(backing_label))
-            stem_paths = []
-            for name, audio in outs.items():
-                stem_paths.append(audio_io.write(
-                    folder / "Stems" / f"{song} - {name.title()}", audio, sr, cfg.fmt,
-                    tagged(name.title())))
-            del tracks, guitar, backing, outs, mix_np
+        device = plan.device
+        t_sep = time.monotonic()
+        try:
+            stems = self._separate(model, mix, sources, cfg, plan, device, progress,
+                                   cancel, tmp)
+        except (Cancelled, MemoryError):
+            raise
+        except RuntimeError as exc:
+            if device == "cpu" or "out of memory" in str(exc).lower() and device == "cuda":
+                raise
+            # Some GPUs/drivers lack an op: retry on the CPU instead of failing.
+            notes.append(f"GPU failed ({str(exc).splitlines()[0][:80]}), used CPU instead.")
+            device = "cpu"
             _free_memory()
-            set_low_priority(False)
-            return JobResult(g_path, b_path, stem_paths, folder,
-                             time.monotonic() - t0, audio_seconds, t_sep, device, notes)
+            stems = self._separate(model, mix, sources, cfg, plan, device, progress,
+                                   cancel, tmp)
+        del mix
+        t_sep = time.monotonic() - t_sep
+        # Undo normalisation in place, block by block, on the disk-backed buffers.
+        step = model.samplerate * 30
+        for buf in stems.values():
+            for i in range(0, buf.shape[1], step):
+                buf[:, i:i + step] *= std
+                buf[:, i:i + step] += mean
+        return stems, mix_np, model.samplerate, sources, device, t_sep
 
-    def _separate(self, model, mix, sources, target, removed, want_stems,
-                  cfg: JobConfig, plan: ResourcePlan, device: str,
-                  progress: ProgressFn, cancel: threading.Event) -> dict[str, np.ndarray]:
-        """Run the model block by block, keeping only the tracks we need."""
+    def _write_outputs(self, src, cfg, stems, mix_np, sr, target, notes):
+        removed = {target, *[s for s in cfg.also_remove if s in stems]}
+        guitar = stems[target].copy()
+        if cfg.backing_method == "residual":
+            backing = mix_np - guitar
+            for s in removed - {target}:
+                backing -= stems[s]
+        else:
+            backing = np.zeros_like(guitar)
+            for name, audio in stems.items():
+                if name not in removed:
+                    backing += audio
+        extra = {k: v.copy() for k, v in stems.items()} if cfg.export_stems else {}
+
+        # Keep guitar + backing at matched levels so they still add up.
+        tracks = {"guitar": guitar, "backing": backing, **extra}
+        if cfg.clip_mode == "shared_gain" and cfg.fmt != "wav32f":
+            peak = max(float(np.abs(a).max()) for a in tracks.values())
+            if peak > 0.999:
+                gain = 0.999 / peak
+                for a in tracks.values():
+                    a *= gain
+                notes.append(f"Lowered volume by {-20 * math.log10(gain):.1f} dB "
+                             "to avoid clipping.")
+        elif cfg.clip_mode == "clamp":
+            for a in tracks.values():
+                np.clip(a, -1, 1, out=a)
+
+        tags = audio_io.read_tags(src) if cfg.keep_tags else {}
+        song = audio_io.safe_filename(src.stem)
+        folder = Path(cfg.output_dir)
+        if cfg.folder_per_song:
+            folder = folder / song
+
+        def tagged(suffix: str) -> dict[str, str]:
+            if not tags:
+                return {}
+            t = dict(tags)
+            t["title"] = f"{tags.get('title', song)} ({suffix})"
+            return t
+
+        guitar_label = "Guitar" if target == "guitar" else target.title()
+        backing_label = "Backing Track" + (" (no vocals)" if "vocals" in removed else "")
+        g_path = audio_io.write(folder / f"{song} - {guitar_label}", guitar, sr, cfg.fmt,
+                                tagged(guitar_label))
+        b_path = audio_io.write(folder / f"{song} - {backing_label}", backing, sr, cfg.fmt,
+                                tagged(backing_label))
+        stem_paths = [audio_io.write(folder / "Stems" / f"{song} - {name.title()}", audio,
+                                     sr, cfg.fmt, tagged(name.title()))
+                      for name, audio in extra.items()]
+        return g_path, b_path, stem_paths, folder
+
+    def _separate(self, model, mix, sources, cfg: JobConfig, plan: ResourcePlan,
+                  device: str, progress: ProgressFn, cancel: threading.Event,
+                  tmp: Path) -> dict[str, np.ndarray]:
+        """Run the model block by block into disk-backed buffers (one per part),
+        so memory use stays flat however long the song is."""
         import torch
         from demucs.apply import BagOfModels, TensorChunk, apply_model
 
@@ -255,17 +299,9 @@ class Separator:
                     frac = min(0.99, done / total)
                 progress("Separating", frac)
 
-        idx = {s: i for i, s in enumerate(sources)}
-        keep_idx = [idx[s] for s in sources if s not in removed]
-        rm_extra = [s for s in removed if s != target]
-        out: dict[str, np.ndarray] = {"_guitar": np.zeros((channels, length), np.float32)}
-        if cfg.backing_method == "stems":
-            out["_backing"] = np.zeros((channels, length), np.float32)
-        else:
-            for s in rm_extra:
-                out[f"_rm_{s}"] = np.zeros((channels, length), np.float32)
-        for s in want_stems:
-            out[s] = np.zeros((channels, length), np.float32)
+        out = {name: np.lib.format.open_memmap(tmp / f"{name}.npy", mode="w+",
+                                               dtype=np.float32, shape=(channels, length))
+               for name in sources}
 
         progress("Separating", 0.0)
         last = len(spans) - 1
@@ -284,14 +320,8 @@ class Separator:
                                   num_workers=plan.workers, segment=segment,
                                   callback=cb, progress=False)[0]
             est = est[..., ks - s:ke - s].numpy()  # (sources, C, n)
-            out["_guitar"][:, ks:ke] += est[idx[target]] * w
-            if "_backing" in out:
-                out["_backing"][:, ks:ke] += est[keep_idx].sum(0) * w
-            for st in rm_extra:
-                if f"_rm_{st}" in out:
-                    out[f"_rm_{st}"][:, ks:ke] += est[idx[st]] * w
-            for st in want_stems:
-                out[st][:, ks:ke] += est[idx[st]] * w
+            for j, name in enumerate(sources):
+                out[name][:, ks:ke] += est[j] * w
             del est
             if device != "cpu":
                 _empty_device_cache()

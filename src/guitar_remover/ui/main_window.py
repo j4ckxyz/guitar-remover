@@ -5,8 +5,8 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QPalette
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy, QToolButton,
                                QVBoxLayout, QWidget)
@@ -16,8 +16,16 @@ from ..audio_io import AUDIO_EXTENSIONS
 from ..runner import Runner
 from ..separator import QUALITY_PRESETS, preset_cost
 from ..settings import Settings
+from .widgets import mix as mix_color
 from .widgets import (DropZone, ElidedLabel, JobRow, StepSlider, audio_files, fmt_duration, open_file,
                       secondary, small, theme_icon)
+
+
+class _UpdateBridge(QObject):
+    found = Signal(object, bool)  # Release or None, automatic
+    failed = Signal(str, bool)
+    staged = Signal(object, object, bool)  # release, staged path, then_quit
+    progress = Signal(int, int)
 
 
 class MainWindow(QMainWindow):
@@ -48,6 +56,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menus()
         self._load_settings()
+        self._pending_update = None  # (release, staged) to install when quitting
+        QTimer.singleShot(4000, lambda: self.check_for_updates(automatic=True))
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -56,6 +66,33 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(18, 16, 18, 12)
         root.setSpacing(12)
+
+        # "New version" banner, hidden until an update is found.
+        self.update_bar = QWidget()
+        ub = QHBoxLayout(self.update_bar)
+        ub.setContentsMargins(12, 8, 8, 8)
+        self.update_text = QLabel()
+        self.update_text.setWordWrap(True)
+        self.update_notes = QPushButton("What's New")
+        self.update_now = QPushButton("Update Now")
+        self.update_now.setDefault(True)
+        self.update_later = QPushButton("Later")
+        ub.addWidget(self.update_text, 1)
+        for b in (self.update_notes, self.update_later, self.update_now):
+            ub.addWidget(b)
+        self.update_bar.setAutoFillBackground(True)
+        pal = self.update_bar.palette()
+        pal.setColor(QPalette.ColorRole.Window,
+                     mix_color(pal.color(QPalette.ColorRole.Window),
+                               pal.color(QPalette.ColorRole.Accent), 0.18))
+        self.update_bar.setPalette(pal)
+        self.update_bar.hide()
+        self.update_later.clicked.connect(self._update_later)
+        self.update_now.clicked.connect(self._update_now)
+        self.update_notes.clicked.connect(
+            lambda: self._release and QDesktopServices.openUrl(QUrl(self._release.url)))
+        root.addWidget(self.update_bar)
+        self._release = None
 
         self.drop = DropZone()
         self.drop.clicked.connect(self.add_files_dialog)
@@ -170,6 +207,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_act)
 
         help_menu = mb.addMenu("&Help")
+        upd = QAction("Check for Updates…", self)
+        upd.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)  # macOS app menu
+        upd.triggered.connect(lambda: self.check_for_updates(automatic=False))
+        help_menu.addAction(upd)
         about = QAction(f"About {APP_NAME}", self)
         about.setMenuRole(QAction.MenuRole.AboutRole)
         about.triggered.connect(self.about)
@@ -255,6 +296,7 @@ class MainWindow(QMainWindow):
             row = JobRow(job_id, p)
             row.cancel_requested.connect(self._cancel_job)
             row.open_player_requested.connect(self._open_player_for)
+            row.export_again_requested.connect(self._retry_job)
             row.retry_requested.connect(self._retry_job)
             row.remove_requested.connect(self._remove_row)
             if self.hardware is None:
@@ -373,6 +415,108 @@ class MainWindow(QMainWindow):
             f"(Meta AI, MIT licence). PyTorch {torch.__version__.split('+')[0]}, "
             "Qt for Python.</p>")
 
+    # --------------------------------------------------------------- updates
+    def check_for_updates(self, automatic: bool):
+        import threading
+        import time as _t
+
+        from .. import updater
+        mode = self.settings.get("update_mode")
+        if automatic:
+            if mode == "off" or updater.install_kind() == "source":
+                return
+            if _t.time() - self.settings.get("update_last_check") < 20 * 3600:
+                return
+        if not hasattr(self, "_ub"):
+            self._ub = _UpdateBridge()
+            self._ub.found.connect(self._update_found)
+            self._ub.failed.connect(self._update_failed)
+            self._ub.staged.connect(self._update_staged)
+            self._ub.progress.connect(
+                lambda d, t: self.update_text.setText(
+                    f"Downloading version {self._release.version}… "
+                    f"{d * 100 // t if t else 0}%"))
+
+        def work():
+            try:
+                rel = updater.latest_release()
+                self.settings.set("update_last_check", _t.time())
+                self._ub.found.emit(rel if updater.is_newer(rel.version) else None, automatic)
+            except updater.UpdateError as exc:
+                self._ub.failed.emit(str(exc), automatic)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_found(self, rel, automatic: bool):
+        from .. import __version__, updater
+        if rel is None:
+            if not automatic:
+                QMessageBox.information(self, "No updates",
+                                        f"You have the latest version ({__version__}).")
+            return
+        if automatic and rel.version == self.settings.get("update_skip"):
+            return
+        self._release = rel
+        if automatic and self.settings.get("update_mode") == "auto" \
+                and updater.install_kind() != "uv":
+            self._start_update(then_quit=False)  # download now, install when you quit
+            return
+        self.update_text.setText(f"<b>Guitar Remover {rel.version}</b> is available "
+                                 f"(you have {__version__}).")
+        self.update_bar.show()
+        for b in (self.update_now, self.update_later, self.update_notes):
+            b.setEnabled(True)
+
+    def _update_failed(self, msg: str, automatic: bool):
+        if not automatic:
+            QMessageBox.warning(self, "Couldn't check for updates", msg)
+
+    def _update_later(self):
+        if self._release:
+            self.settings.set("update_skip", self._release.version)
+        self.update_bar.hide()
+
+    def _update_now(self):
+        busy = any(r.state in ("waiting", "running") for r in self.rows.values())
+        if busy:
+            QMessageBox.information(self, "Songs are still processing",
+                                    "The update will install when you quit the app.")
+            self._start_update(then_quit=False)
+            return
+        self._start_update(then_quit=True)
+
+    def _start_update(self, then_quit: bool):
+        import threading
+
+        from .. import updater
+        rel = self._release
+        for b in (self.update_now, self.update_later):
+            b.setEnabled(False)
+
+        def work():
+            try:
+                staged = updater.prepare(rel, self._ub.progress.emit)
+                self._ub.staged.emit(rel, staged, then_quit)
+            except Exception as exc:  # noqa: BLE001
+                self._ub.failed.emit(str(exc), False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_staged(self, rel, staged, then_quit: bool):
+        from .. import updater
+        self._pending_update = (rel, staged)
+        if then_quit:
+            try:
+                updater.apply(rel, staged, relaunch=True)
+            except updater.UpdateError as exc:
+                QMessageBox.warning(self, "Couldn't update", str(exc))
+                return
+            self._pending_update = None
+            self._force_quit = True
+            self.close()
+        else:
+            self.update_text.setText(f"Guitar Remover {rel.version} will install when you "
+                                     "quit.")
+            self.update_bar.show()
+
     # ------------------------------------------------------ runner signals
     def _on_ready(self, hw):
         self.hardware = hw
@@ -467,7 +611,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         busy = any(r.state in ("waiting", "running") for r in self.rows.values())
-        if busy:
+        if busy and not getattr(self, "_force_quit", False):
             ans = QMessageBox.question(
                 self, "Stop and quit?",
                 "Songs are still being processed. Quit anyway?",
@@ -477,4 +621,15 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
         self.runner.stop()
+        if self._pending_update:  # downloaded earlier: swap it in once we've quit
+            from .. import updater
+            try:
+                updater.apply(*self._pending_update, relaunch=False)
+            except updater.UpdateError:
+                pass
+        for w in list(self.players):
+            try:
+                w.close()
+            except RuntimeError:
+                pass
         e.accept()

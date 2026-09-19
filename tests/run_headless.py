@@ -64,6 +64,10 @@ def prog(stage, frac):
         last[:] = [now, stage]
 
 
-res = sep.run(song, cfg, plan, prog, threading.Event())
+cache = None
+if "cache" in extra:
+    from guitar_remover.stem_cache import StemCache
+    cache = StemCache(Path(extra["cache"]), 2 * 1024 ** 3)
+res = sep.run(song, cfg, plan, prog, threading.Event(), cache)
 print(res)
 print(f"speed: {res.audio_seconds / res.seconds:.2f}x realtime, peak RSS {peak / 1e9:.2f} GB")

@@ -39,6 +39,12 @@ function Install-Release {
   $exe = Join-Path $Dest "GuitarRemover.exe"
   New-Shortcut $Menu $exe
   New-Shortcut $Desk $exe
+  # A terminal command too, e.g. for "guitar-remover --update".
+  Set-Content (Join-Path $Dest "guitar-remover.cmd") "@`"%~dp0GuitarRemover.exe`" %*"
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if ($userPath -notlike "*$Dest*") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$Dest", "User")
+  }
   Say "Installed. Open Guitar Remover from the Start menu or your desktop."
   return $true
 }
@@ -60,6 +66,8 @@ function Install-Source {
 
 if ($Uninstall) {
   Remove-Item $Dest -Recurse -Force -ErrorAction SilentlyContinue
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  [Environment]::SetEnvironmentVariable("Path", (($userPath -split ";") -ne $Dest) -join ";", "User")
   Remove-Item $Menu, $Desk -Force -ErrorAction SilentlyContinue
   if (Get-Command uv -ErrorAction SilentlyContinue) { uv tool uninstall guitar-remover 2>$null }
   Say "Guitar Remover removed. (Downloaded models stay in your AppData folder.)"

@@ -291,6 +291,7 @@ class JobRow(QFrame):
 
     cancel_requested = Signal(int)
     open_player_requested = Signal(int)
+    export_again_requested = Signal(int)
     retry_requested = Signal(int)
     remove_requested = Signal(int)
 
@@ -341,6 +342,10 @@ class JobRow(QFrame):
         self.open_player.setDefault(True)
         self.open_player.clicked.connect(lambda: self.open_player_requested.emit(self.job_id))
         self.reveal = QPushButton(f"Show in {FILE_MANAGER}")
+        self.again = QPushButton("Save Again")
+        self.again.setToolTip("Save this song again with your current settings (format, "
+                              "vocals…). Takes seconds, because the separation is remembered.")
+        self.again.clicked.connect(lambda: self.export_again_requested.emit(self.job_id))
         self.retry = QPushButton("Try Again")
         play = theme_icon("MediaPlaybackStart")
         if not play.isNull():
@@ -350,7 +355,7 @@ class JobRow(QFrame):
             self.reveal.setIcon(folder)
         self.reveal.clicked.connect(lambda: self.result and reveal_in_file_manager(self.result.backing))
         self.retry.clicked.connect(lambda: self.retry_requested.emit(self.job_id))
-        for b in (self.open_player, self.reveal, self.retry):
+        for b in (self.open_player, self.reveal, self.again, self.retry):
             al.addWidget(b)
         al.addStretch(1)
         self.actions.hide()
@@ -413,13 +418,17 @@ class JobRow(QFrame):
         self.result = result
         self.bar.hide()
         speed = result.audio_seconds / max(result.seconds, 0.01)
-        txt = f"Done in {fmt_duration(result.seconds)} · {speed:.1f}× faster than real time"
+        if getattr(result, "cached", False):
+            txt = f"Done in {fmt_duration(result.seconds)} · used the remembered separation"
+        else:
+            txt = f"Done in {fmt_duration(result.seconds)} · {speed:.1f}× faster than real time"
         if notes:
             txt += f"\n{notes}"
         self.status.setText(txt)
         self.status.setToolTip(str(result.folder))
         self.actions.show()
         self.open_player.show()
+        self.again.show()
         self.reveal.show()
         self.retry.hide()
         self.close_btn.setToolTip("Remove from list")
@@ -431,6 +440,7 @@ class JobRow(QFrame):
         self.status.setToolTip(details[-2000:] if details else message)
         self.actions.show()
         self.open_player.hide()
+        self.again.hide()
         self.reveal.hide()
         self.retry.show()
         self.close_btn.setToolTip("Remove from list")
@@ -441,6 +451,7 @@ class JobRow(QFrame):
         self.status.setText("Cancelled")
         self.actions.show()
         self.open_player.hide()
+        self.again.hide()
         self.reveal.hide()
         self.retry.show()
         self.close_btn.setToolTip("Remove from list")

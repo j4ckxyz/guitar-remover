@@ -63,12 +63,19 @@ src/guitar_remover/
   hardware.py    hardware detection → ResourcePlan (device, threads, block size)
   models.py      model catalogue, downloads with progress, loading
   separator.py   block-wise separation engine and output writing
-  playback.py    real-time mixer for the player (pure mix() function + PortAudio stream)
+  playback.py    real-time mixer for the player (pure mix() function + PortAudio stream,
+                 count-in pre-roll)
+  stem_cache.py  remembered separations: every part as FLAC, keyed by content + settings
+  analysis.py    tempo/beat/bar detection (NumPy only) and click synthesis
+  pitch.py       transpose via Signalsmith Stretch (python-stretch)
+  transcribe.py  Basic Pitch (ONNX, bundled in data/) → notes → tab fingering → MIDI
+  songdata.py    per-song JSON: saved loops, tempo corrections, transpose
+  updater.py     GitHub release check, download + SHA-256 verify, helper-script swap
   audio_io.py    decode/encode through bundled FFmpeg (imageio-ffmpeg)
   settings.py    QSettings with typed DEFAULTS
   runner.py      QThread job queue (torch is imported here, off the UI thread)
   app.py         entry point, platform styling, --selftest, --export-icon
-  ui/            main_window, player, settings_dialog, widgets, icon
+  ui/            main_window, player, transcription, settings_dialog, widgets, icon
 tools/           check_version.py (release gate)
 packaging/       PyInstaller spec, build scripts, Linux desktop entry
 install.sh / install.ps1   one-command installers (release download, else uv source install)
@@ -116,7 +123,16 @@ packaging/build_macos.sh                                  # or build_linux.sh / 
 - Match the existing style: type hints, `from __future__ import annotations`, small
   functions, comments only where the why isn't obvious. Keep pyflakes clean.
 - New dependencies: add them to both `requirements.txt` and `pyproject.toml`, and check that
-  the PyInstaller build still bundles them (`--selftest` on the built app).
+  the PyInstaller build still bundles them (`--selftest` on the built app exercises
+  separation, tempo, transpose and the tab model).
+- Separation engine: `Separator.run` checks the cache first; on a miss `_separate` fills
+  disk-backed buffers (one per part). Anything that changes model output (model, shifts,
+  overlap, window length) must be part of `stem_cache.make_key`; bump `CACHE_VERSION` if
+  the stored format or engine maths change.
+- Updater: release asset names and `SHA256SUMS.txt` are what `updater.py` looks for; keep
+  them in sync with the release workflow. Test swaps locally by serving a fake release
+  JSON and pointing `GR_UPDATE_API` at it (never test against real users' installs).
+- Transcription screenshots and tests use original synthetic melodies, never real songs.
 
 ## Platform notes
 

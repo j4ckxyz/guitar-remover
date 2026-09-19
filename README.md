@@ -10,9 +10,10 @@
 </p>
 
 Drop in a song and Guitar Remover gives you two files: **the guitar on its own** and a
-**backing track** with everything else. A built-in player then shows both as waveforms, so
-you can mute the guitar, loop a tricky section and play along. Nothing is uploaded, and
-after a one-off 55 MB model download it works offline.
+**backing track** with everything else. A built-in practice player shows both as
+waveforms with bar lines, so you can mute the guitar, loop a tricky section, add a
+count-in, change the key and play along. It can also write out the guitar part as tab and
+MIDI. Nothing is uploaded, and after a one-off 55 MB model download it works offline.
 
 It uses Meta's [Demucs](https://github.com/adefossez/demucs) `htdemucs_6s` model, which has
 a dedicated guitar stem. Other Demucs models can be chosen in Settings.
@@ -22,7 +23,10 @@ a dedicated guitar stem. Other Demucs models can be chosen in Settings.
   <img src="docs/main-dark.png" width="46%" alt="Main window in dark mode">
 </p>
 <p align="center">
-  <img src="docs/player.png" width="94%" alt="The built-in player with guitar and backing track waveforms">
+  <img src="docs/player.png" width="94%" alt="The practice player: guitar and backing track waveforms with bar numbers, a saved loop and the practice toolbar">
+</p>
+<p align="center">
+  <img src="docs/tab.png" width="70%" alt="Guitar to Tab: an automatic transcription of a practice riff">
 </p>
 
 ## Download
@@ -119,11 +123,23 @@ If it doesn't start, or there's no sound, install two small system libraries:
 
 ### The player
 
-A small Audacity-style window with the guitar and backing track shown as waveforms.
+A small Audacity-style practice window with the guitar and backing track shown as
+waveforms.
 
 - **Play, pause and skip** with the transport buttons or the keyboard.
 - **Click** a waveform to jump there. **Drag** across it to select a section, then press
   **Loop Selection** to practise that part on repeat.
+- **Tempo and bars**: the beat is found automatically, with bar numbers on the ruler and
+  bar lines through the waveforms. Selections **snap to bars** (hold ⌥/Alt to select
+  freely). If the tempo reads as half or double time, or bar 1 is in the wrong place,
+  fix it from the tempo menu (for example "♩ 133 BPM · 4/4").
+- **Count-in** plays one bar of clicks at the song's tempo before the music starts.
+- **Key**: ♭ / ♯ transpose everything by a semitone at a time without changing the speed.
+  For a song recorded in E♭ tuning, press ♯ once to play along in standard tuning.
+- **Saved loops**: **Save Loop…** remembers the selected section (named automatically,
+  such as "Bars 28 to 31"). Saved loops appear above the ruler and in the Loops menu, and
+  are kept with the song's tempo and key settings, even if you move or rename the files.
+- **Guitar to Tab…** writes out the guitar part as tab and MIDI (see below).
 - **Mute** or **Solo** each track, and set each track's **volume** (0 to 200%; double-click
   the slider to reset it). The waveforms redraw to match what you hear.
 - **Zoom** with the buttons, **⌘/Ctrl + scroll**, or a trackpad pinch.
@@ -138,7 +154,45 @@ A small Audacity-style window with the guitar and backing track shown as wavefor
 | ← / → | Back / forward 5 seconds |
 | Home / End | Start (or loop start) / end |
 | L | Loop the selection on or off |
+| C | Count-in on or off |
 | + / − / 0 | Zoom in / out / show the whole song |
+
+### Guitar to Tab
+
+**Guitar to Tab…** in the player listens to the separated guitar and writes it out:
+
+- **Tab**, laid out in bars using the detected tempo, for a range of tunings (standard,
+  E♭, drop D, D standard, drop C♯, drop C, open G and DADGAD). Frets are chosen to keep
+  chord shapes playable and your hand moving as little as possible.
+- **MIDI** (**Save MIDI…**), to open in MuseScore, Guitar Pro or your DAW.
+- A **Fewer notes ↔ More notes** slider, if it's picking up too much or too little.
+
+It uses Spotify's [Basic Pitch](https://github.com/spotify/basic-pitch) model and takes a
+second or two. Automatic transcription is a starting point, so check it by ear: fast
+passages, bends and dense chords are approximate.
+
+### Remembered songs
+
+Every part of each song you separate is kept as lossless FLAC (3 GB by default, about 20
+songs; change it or clear it in Settings → Performance). Changing the file format or the
+vocal setting, or pressing **Save Again** on a finished song, then takes a second or two
+instead of separating again. The oldest songs are removed when the space is full.
+
+### Updates
+
+Guitar Remover checks for new versions once a day and shows a banner when one is ready.
+**Update Now** downloads it, checks it against the release's SHA-256 checksums, and
+restarts into the new version. To do this without asking, choose "Install automatically
+when I quit" under Settings → General → Updates. You can also use **Help → Check for
+Updates…**, or a terminal:
+
+```sh
+guitar-remover --update         # install the latest version
+guitar-remover --check-update   # just check
+guitar-remover --version
+```
+
+Running the one-command install again also updates it.
 
 ### Settings
 
@@ -148,9 +202,9 @@ Open with **⌘,** (macOS) or **Ctrl+,** (Windows and Linux).
   - where to save, and whether each song gets its own folder
   - file format: WAV 16-bit, 24-bit or 32-bit float, FLAC, or MP3
   - whether to remove the vocals too, for a full instrumental
-  - what happens when a song is done
-- **Performance**: a **Lighter ↔ Faster** slider and a GPU switch. This tab also shows
-  exactly how the app will use your hardware.
+  - what happens when a song is done, and how updates are installed
+- **Performance**: a **Lighter ↔ Faster** slider, a GPU switch, and how much space
+  remembered songs can use. This tab also shows exactly how the app will use your hardware.
 - **Advanced**, for experimenting (the defaults are right for almost everyone):
   - which model to use: the built-in list, any Demucs model on the
     [Hugging Face hub](https://huggingface.co/adefossez), or a local model folder
@@ -216,7 +270,9 @@ The packaged app peaks at about 0.75 GB while separating and uses about 0.3 GB w
 | [python-sounddevice](https://python-sounddevice.readthedocs.io) and [PortAudio](https://www.portaudio.com) | Live playback in the player |
 | [python-soundfile](https://github.com/bastibe/python-soundfile) and [libsndfile](https://libsndfile.github.io/libsndfile/) | Writing WAV and FLAC files |
 | [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg) and [FFmpeg](https://ffmpeg.org) | Reading every audio format, and writing MP3 |
-| [NumPy](https://numpy.org) | Audio processing and waveform drawing |
+| [NumPy](https://numpy.org) | Audio processing, waveforms, tempo and beat detection |
+| [Basic Pitch](https://github.com/spotify/basic-pitch) (Apache 2.0) and [ONNX Runtime](https://onnxruntime.ai) | Guitar to tab and MIDI |
+| [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) via [python-stretch](https://github.com/gregogiudici/python-stretch) | Transposing without changing speed |
 | [psutil](https://github.com/giampaolo/psutil) | Hardware detection and process priority |
 | [huggingface_hub](https://github.com/huggingface/huggingface_hub), [HTTPX](https://www.python-httpx.org), [safetensors](https://github.com/huggingface/safetensors), [PyYAML](https://pyyaml.org) | Downloading and loading models |
 
@@ -268,9 +324,10 @@ To check a build without opening the window, run
 
 ```sh
 uv pip install pytest
-TEST_SONG=song.mp3 .venv/bin/python -m pytest tests   # engine and player mixer
+TEST_SONG=song.mp3 .venv/bin/python -m pytest tests   # engine, cache, mixer, tempo, tab
 .venv/bin/python tests/run_headless.py SONG [0-4]     # one separation, with a memory watchdog
 .venv/bin/python tests/ui_smoke.py SONG OUT [light|dark]  # drives the real UI, saves screenshots
+.venv/bin/python tests/player_smoke.py GUITAR BACKING OUT [light|dark]  # practice tools
 ```
 
 ## Project layout
@@ -280,12 +337,19 @@ src/guitar_remover/
   hardware.py    hardware detection and the resource plan
   models.py      model catalogue, downloads with progress, loading
   separator.py   block-wise separation, output mixing and writing
-  playback.py    real-time multitrack mixer for the player
+  playback.py    real-time multitrack mixer for the player (with count-in)
+  stem_cache.py  remembered separations (FLAC, size-limited)
+  analysis.py    tempo, beat and bar detection
+  pitch.py       transposing (Signalsmith Stretch)
+  transcribe.py  guitar to notes (Basic Pitch), tab fingering and MIDI
+  songdata.py    per-song saved loops, tempo and key
+  updater.py     update check, download, verify and swap
+  data/          the Basic Pitch model and its licence
   audio_io.py    reading and writing audio through a bundled FFmpeg
   settings.py    settings (plist / registry / ~/.config)
   runner.py      background job queue
   app.py         entry point, platform styling, --selftest
-  ui/            main window, player, settings, widgets, icon
+  ui/            main window, player, tab window, settings, widgets, icon
 packaging/       PyInstaller spec, build scripts, Linux desktop entry
 tools/           check_version.py, the release version gate
 install.sh       one-command installer for macOS and Linux

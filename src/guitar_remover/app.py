@@ -69,6 +69,16 @@ def selftest(song: str, out_dir: str) -> int:
                   plan, progress, threading.Event())
     print(f"OK {res.guitar}\nOK {res.backing}\n"
           f"{res.audio_seconds / res.seconds:.1f}x realtime on {res.device}", flush=True)
+    # Practice tools: tempo, transpose and the bundled tab model must all load.
+    import soundfile as sf
+
+    from . import analysis, pitch, transcribe
+    g, sr = sf.read(str(res.guitar), dtype="float32", always_2d=True)
+    tempo = analysis.analyse(g, sr)
+    shifted = pitch.transpose(g[: sr * 5], sr, 1)
+    notes = transcribe.notes_from_output(transcribe.model_output(g[: sr * 20], sr))
+    print(f"Tempo {tempo.bpm:.0f} BPM · transpose ok ({shifted.shape[0] == sr * 5}) · "
+          f"tab model ok ({len(notes)} notes in 20 s)", flush=True)
     try:  # playback library present and able to see an output device?
         import sounddevice as sd
         print("Audio output:", sd.query_devices(kind="output")["name"], flush=True)
@@ -94,6 +104,13 @@ def main() -> int:
         return selftest(sys.argv[2], sys.argv[3])
     if len(sys.argv) >= 3 and sys.argv[1] == "--export-icon":
         return export_icon(sys.argv[2])
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--update", "--check-update", "--version"):
+        from . import __version__, updater
+        updater.attach_console()
+        if sys.argv[1] == "--version":
+            print(__version__)
+            return 0
+        return updater.cli_update(check_only=sys.argv[1] == "--check-update")
     if sys.platform.startswith("linux"):
         # Lets Wayland compositors match the window to guitar-remover.desktop (icon).
         from PySide6.QtGui import QGuiApplication

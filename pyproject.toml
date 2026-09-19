@@ -18,6 +18,8 @@ dependencies = [
     "safetensors",
     "pyyaml",
     "sounddevice",
+    "python-stretch",
+    "onnxruntime",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +34,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
 version = { attr = "guitar_remover.__version__" }
+
+[tool.setuptools.package-data]
+guitar_remover = ["data/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

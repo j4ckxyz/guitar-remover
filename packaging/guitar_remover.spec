@@ -15,10 +15,12 @@ hiddenimports = (
     collect_submodules("demucs", filter=lambda m: not m.startswith(("demucs.grids", "demucs.train",
                                                                      "demucs.solver", "demucs.evaluate"))) +
     ["huggingface_hub", "httpx", "yaml", "safetensors", "safetensors.torch", "soundfile",
-     "sounddevice", "PySide6.QtDBus"]
+     "sounddevice", "PySide6.QtDBus", "onnxruntime", "python_stretch"]
 )
 datas = (collect_data_files("demucs") + collect_data_files("imageio_ffmpeg") +
-         collect_data_files("_sounddevice_data"))
+         collect_data_files("_sounddevice_data") + collect_data_files("onnxruntime") +
+         # Our own data: the Basic Pitch model and its licence.
+         [(str(p), "guitar_remover/data") for p in (ROOT / "src/guitar_remover/data").iterdir()])
 
 # PortAudio ships inside the sounddevice wheel on macOS/Windows; on Linux bundle
 # the system copy (apt install libportaudio2) so playback works out of the box.

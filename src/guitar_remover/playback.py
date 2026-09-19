@@ -101,6 +101,8 @@ class Player:
         self._lock = threading.Lock()
         self._stream = None
         self.error: str | None = None
+        self._pre: np.ndarray | None = None  # count-in clicks played before the music
+        self._pre_pos = 0
 
     # -- stream -------------------------------------------------------------
     def _ensure_stream(self) -> bool:
@@ -131,6 +133,12 @@ class Player:
         self._stream.start()
         return True
 
+    def replace_audio(self, datas: list[np.ndarray]) -> None:
+        """Swap every track's audio (e.g. after transposing) without a glitch."""
+        with self._lock:
+            for t, d in zip(self.tracks, datas):
+                t.data = d
+
     def _resample(self, rate: int) -> None:
         ratio = rate / self.samplerate
         for t in self.tracks:
@@ -150,13 +158,26 @@ class Player:
             if not self.playing:
                 outdata.fill(0)
                 return
-            out, pos, ended = mix(self.tracks, self.position, frames, self.master,
-                                  self.loop, self.length)
-            self.position = pos
-            if ended:
-                self.playing = False
-                self.position = self.length
-        outdata[:] = out
+            done = 0
+            if self._pre is not None:
+                m = min(frames, len(self._pre) - self._pre_pos)
+                outdata[:m] = self._pre[self._pre_pos:self._pre_pos + m] * self.master
+                self._pre_pos += m
+                done = m
+                if self._pre_pos >= len(self._pre):
+                    self._pre = None
+            if done < frames:
+                out, pos, ended = mix(self.tracks, self.position, frames - done, self.master,
+                                      self.loop, self.length)
+                self.position = pos
+                outdata[done:] = out
+                if ended:
+                    self.playing = False
+                    self.position = self.length
+
+    @property
+    def counting_in(self) -> bool:
+        return self._pre is not None
 
     def close(self) -> None:
         with self._lock:
@@ -170,10 +191,14 @@ class Player:
             self._stream = None
 
     # -- controls -------------------------------------------------------------
-    def play(self) -> bool:
+    def play(self, count_in: np.ndarray | None = None) -> bool:
+        """Start playing; count_in is optional (frames,) click audio to play first."""
         if not self._ensure_stream():
             return False
         with self._lock:
+            if count_in is not None and len(count_in):
+                self._pre = np.repeat(count_in[:, None], 2, axis=1).astype(np.float32)
+                self._pre_pos = 0
             if self.position >= self.length:
                 self.position = self.loop[0] if self.loop else 0
             elif self.loop and not (self.loop[0] <= self.position < self.loop[1]):
@@ -184,6 +209,7 @@ class Player:
     def pause(self) -> None:
         with self._lock:
             self.playing = False
+            self._pre = None
 
     def seek(self, frame: int) -> None:
         with self._lock:

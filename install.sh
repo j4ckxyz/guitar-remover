@@ -86,6 +86,9 @@ install_release_macos() {
   # Downloads made by curl aren't quarantined, but clear the flag in case, so
   # macOS doesn't show the "can't be opened" warning for this unsigned app.
   xattr -dr com.apple.quarantine "$DEST/Guitar Remover.app" 2>/dev/null || true
+  # A terminal command too, e.g. for "guitar-remover --update".
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$DEST/Guitar Remover.app/Contents/MacOS/GuitarRemover" "$HOME/.local/bin/guitar-remover"
   say "Installed to $DEST/Guitar Remover.app"
   open -R "$DEST/Guitar Remover.app" 2>/dev/null || true
 }
@@ -147,6 +150,7 @@ PLIST
 uninstall() {
   if [ "$OS" = "Darwin" ]; then
     rm -rf "/Applications/Guitar Remover.app" "$HOME/Applications/Guitar Remover.app"
+    rm -f "$HOME/.local/bin/guitar-remover"
   else
     rm -rf "$DATA/guitar-remover" "$HOME/.local/bin/guitar-remover" \
       "$DATA/applications/guitar-remover.desktop" \

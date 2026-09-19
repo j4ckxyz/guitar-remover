@@ -13,3 +13,5 @@ httpx
 safetensors
 pyyaml
 sounddevice
+python-stretch
+onnxruntime

@@ -6,21 +6,29 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QEvent, QLineF, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QKeySequence, QPainter, QPalette, QPen, QPixmap,
-                           QShortcut)
-from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+import threading
+
+from PySide6.QtCore import QEvent, QLineF, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QKeySequence, QPainter,
+                           QPalette, QPen, QPixmap, QShortcut)
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QInputDialog, QMenu, QLabel, QMessageBox, QPushButton,
                                QScrollBar, QSizePolicy, QSlider, QToolButton, QVBoxLayout,
                                QWidget)
 
 from .. import APP_NAME, audio_io
+from ..analysis import Tempo, analyse, click_track
+from ..pitch import describe as describe_key
+from ..pitch import transpose
 from ..playback import PEAK_BLOCK, Player, Track, load_track
+from ..songdata import SongData
 from .widgets import mix as mix_color
 from .widgets import secondary, small, theme_icon
 
 LANE_H = 116  # preferred lane height; lanes stretch with the window
 MIN_LANE_H = 80
-RULER_H = 26
+RULER_H = 44  # top row: saved loops; bottom row: bars (or time)
+LOOP_ROW_H = 17
 TRACK_COLOURS = ["#f5793a", "#3a8ef5", "#2bb673", "#b35cf0", "#e84a6f", "#d9a400"]
 
 
@@ -37,6 +45,7 @@ class Timeline(QWidget):
     seek_requested = Signal(int)
     selection_changed = Signal(object)  # (start, end) frames or None
     view_changed = Signal()
+    loop_clicked = Signal(object)  # a saved loop dict
 
     def __init__(self, player: Player, parent=None):
         super().__init__(parent)
@@ -48,6 +57,10 @@ class Timeline(QWidget):
         self._drag_from: int | None = None
         self._cache: QPixmap | None = None
         self.follow = True
+        self.tempo = None  # analysis.Tempo once detected
+        self.snap_bars = True
+        self.loops: list[dict] = []  # saved loops, drawn as markers on the ruler
+        self._loop_rects: list[tuple[QRectF, dict]] = []
         self.setMinimumHeight(RULER_H + MIN_LANE_H * len(self.tracks))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
@@ -155,26 +168,72 @@ class Timeline(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         w = self.width()
 
-        # Ruler
+        # Ruler: saved loops on top, bar numbers (or time) underneath.
         p.fillRect(QRectF(0, 0, w, RULER_H), mix_color(window, text, 0.04))
-        p.setPen(mix_color(window, text, 0.5))
         f = QFont(self.font())
         f.setPointSizeF(f.pointSizeF() * 0.8)
         p.setFont(f)
         sr = self.player.samplerate
         secs_per_px = self.spp / sr
-        step = next((s for s in (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300)
-                     if s / secs_per_px >= 70), 600)
         t0 = self.offset / sr
-        first = np.ceil(t0 / step) * step
-        tick = first
-        while True:
-            x = (tick - t0) / secs_per_px
-            if x > w:
-                break
-            p.drawLine(QLineF(x, RULER_H - 7, x, RULER_H))
-            p.drawText(QPointF(x + 3, RULER_H - 9), fmt_time(tick, step < 1))
-            tick += step
+        tick_col = mix_color(window, text, 0.5)
+        bar_lines: list[float] = []
+        beat_lines: list[float] = []
+        tp = self.tempo
+        if tp is not None and len(tp.beats) > 1:
+            px_per_beat = tp.beat_period() / secs_per_px
+            px_per_bar = px_per_beat * tp.beats_per_bar
+            label_every = next((n for n in (1, 2, 4, 8, 16, 32) if n * px_per_bar >= 34), 64)
+            bars = tp.bar_starts
+            for k, bt in enumerate(bars):
+                x = (bt - t0) / secs_per_px
+                if -40 <= x <= w:
+                    bar_lines.append(x)
+                    if k % label_every == 0:
+                        p.setPen(tick_col)
+                        p.drawLine(QLineF(x, RULER_H - 9, x, RULER_H))
+                        p.drawText(QPointF(x + 3, RULER_H - 10), str(k + 1))
+            if px_per_beat >= 10:
+                for bt in tp.beats:
+                    x = (bt - t0) / secs_per_px
+                    if 0 <= x <= w:
+                        beat_lines.append(x)
+                        p.setPen(mix_color(window, text, 0.3))
+                        p.drawLine(QLineF(x, RULER_H - 4, x, RULER_H))
+        else:
+            step = next((s for s in (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300)
+                         if s / secs_per_px >= 70), 600)
+            tick = np.ceil(t0 / step) * step
+            p.setPen(tick_col)
+            while True:
+                x = (tick - t0) / secs_per_px
+                if x > w:
+                    break
+                p.drawLine(QLineF(x, RULER_H - 7, x, RULER_H))
+                p.drawText(QPointF(x + 3, RULER_H - 9), fmt_time(tick, step < 1))
+                tick += step
+        # Saved loops
+        self._loop_rects = []
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        accent = self.palette().color(QPalette.ColorRole.Accent)
+        for loop in self.loops:
+            x1 = (loop["start"] - t0) / secs_per_px
+            x2 = (loop["end"] - t0) / secs_per_px
+            if x2 < 0 or x1 > w:
+                continue
+            rect = QRectF(x1, 2, max(4.0, x2 - x1), LOOP_ROW_H - 3)
+            fill = QColor(accent)
+            fill.setAlphaF(0.28)
+            p.setPen(QPen(accent, 1))
+            p.setBrush(fill)
+            p.drawRoundedRect(rect, 4, 4)
+            p.setPen(text)
+            p.drawText(rect.adjusted(5, 0, -3, 0),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       p.fontMetrics().elidedText(loop["name"], Qt.TextElideMode.ElideRight,
+                                                  int(rect.width() - 8)))
+            self._loop_rects.append((rect, loop))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         p.setPen(mix_color(window, text, 0.15))
         p.drawLine(QLineF(0, RULER_H - 0.5, w, RULER_H - 0.5))
 
@@ -204,6 +263,13 @@ class Timeline(QWidget):
             p.setPen(mix_color(window, text, 0.12))
             p.drawLine(QLineF(0, mid, w, mid))
             p.drawLine(QLineF(0, top + lane_h - 0.5, w, top + lane_h - 0.5))
+        h = self.height()
+        if beat_lines:
+            p.setPen(QPen(mix_color(window, text, 0.07), 1))
+            p.drawLines([QLineF(x, RULER_H, x, h) for x in beat_lines])
+        if bar_lines:
+            p.setPen(QPen(mix_color(window, text, 0.16), 1))
+            p.drawLines([QLineF(x, RULER_H, x, h) for x in bar_lines])
         p.end()
         return pm
 
@@ -243,8 +309,21 @@ class Timeline(QWidget):
         self.update()
 
     # -- mouse / gestures -------------------------------------------------------
+    def _snap(self, frame: int, mods) -> int:
+        """Snap to the nearest bar start (hold Alt/Option for free selection)."""
+        if (not self.snap_bars or self.tempo is None or len(self.tempo.beats) < 2
+                or mods & Qt.KeyboardModifier.AltModifier):
+            return frame
+        sr = self.player.samplerate
+        return int(np.clip(self.tempo.snap(frame / sr, "bar") * sr, 0, self.length))
+
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            if e.position().y() < LOOP_ROW_H:
+                for rect, loop in self._loop_rects:
+                    if rect.contains(e.position()):
+                        self.loop_clicked.emit(loop)
+                        return
             self._drag_from = self.x_to_frame(e.position().x())
             self._pressed_x = e.position().x()
 
@@ -252,6 +331,10 @@ class Timeline(QWidget):
         if self._drag_from is not None and abs(e.position().x() - self._pressed_x) > 3:
             f = self.x_to_frame(e.position().x())
             a, b = sorted((self._drag_from, f))
+            a, b = self._snap(a, e.modifiers()), self._snap(b, e.modifiers())
+            if b <= a and self.tempo is not None and self.snap_bars:
+                b = self._snap(a + int(self.tempo.beat_period() * self.tempo.beats_per_bar
+                                       * self.player.samplerate), e.modifiers())
             self.selection = (a, b)
             self.update()
 
@@ -384,6 +467,12 @@ class TrackHeader(QWidget):
         p.fillRect(QRectF(0, 6, 5, self.height() - 12), self.colour)
 
 
+class _Bridge(QObject):
+    """Carries results from worker threads back to the UI thread."""
+    tempo_ready = Signal(object)
+    transposed = Signal(int, object)  # semitones, list of arrays
+
+
 class PlayerWindow(QWidget):
     def __init__(self, paths: list[tuple[str, Path]], title: str, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
@@ -392,13 +481,21 @@ class PlayerWindow(QWidget):
         self.title = title
         self.tracks = [load_track(p, name) for name, p in paths]
         self.player = Player(self.tracks)
-        self.resize(980, RULER_H + LANE_H * len(self.tracks) + 110)
+        self.originals = [t.data for t in self.tracks]  # untransposed audio
+        self.song = SongData(paths[0][1])
+        self.semitones = 0
+        self._bridge = _Bridge()
+        self._bridge.tempo_ready.connect(self._tempo_ready)
+        self._bridge.transposed.connect(self._transposed)
+        self.resize(1060, RULER_H + LANE_H * len(self.tracks) + 150)
         self.setMinimumWidth(640)
 
         self.timeline = Timeline(self.player)
         self.timeline.seek_requested.connect(self._seek)
         self.timeline.selection_changed.connect(self._selection)
         self.timeline.view_changed.connect(self._sync_scrollbar)
+        self.timeline.loop_clicked.connect(self._use_loop)
+        self.timeline.loops = self.song.loops
         self.scroll = QScrollBar(Qt.Orientation.Horizontal)
         self.scroll.valueChanged.connect(self._scrolled)
 
@@ -469,7 +566,7 @@ class PlayerWindow(QWidget):
         ic = theme_icon("AudioVolumeHigh")
         if not ic.isNull():
             vol_icon.setPixmap(ic.pixmap(18, 18))
-        export = QPushButton("Export Mix…")
+        self.export_btn = export = QPushButton("Export Mix…")
         export.setToolTip("Save what you hear (with your volume, mute and solo settings) "
                           "as a new file")
         export.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -490,8 +587,8 @@ class PlayerWindow(QWidget):
         transport.addSpacing(10)
         transport.addWidget(vol_icon)
         transport.addWidget(self.master)
-        transport.addSpacing(10)
-        transport.addWidget(export)
+
+        practice = self._build_practice_bar()
 
         hint = QHBoxLayout()
         hint.setContentsMargins(16, 8, 16, 10)
@@ -504,13 +601,20 @@ class PlayerWindow(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addLayout(transport)
+        root.addLayout(practice)
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Plain)
+        line.setForegroundRole(QPalette.ColorRole.Mid)
+        root.addWidget(line)
         root.addLayout(body, 1)
         root.addLayout(hint)
 
         for key, slot in [("Space", self.toggle), ("Left", lambda: self._skip(-5)),
                           ("Right", lambda: self._skip(5)), ("Home", self._home),
                           ("End", lambda: self._seek(self.player.length)),
-                          ("L", self.loop_btn.toggle), ("+", lambda: self.timeline.zoom(1.6)),
+                          ("L", self.loop_btn.toggle), ("C", self.countin_btn.toggle),
+                          ("+", lambda: self.timeline.zoom(1.6)),
                           ("=", lambda: self.timeline.zoom(1.6)),
                           ("-", lambda: self.timeline.zoom(1 / 1.6)), ("0", self.timeline.fit),
                           (QKeySequence.StandardKey.Close, self.close)]:
@@ -523,6 +627,17 @@ class PlayerWindow(QWidget):
         self.timer.start()
         self._was_playing = False
         self._update_time()
+        self._refresh_loops()
+
+        # Tempo: remembered corrections, otherwise detect in the background.
+        if self.song.data.get("tempo"):
+            self._tempo_ready(Tempo.from_dict(self.song.data["tempo"]))
+        else:
+            mix = sum(t.data for t in self.tracks)
+            threading.Thread(target=lambda: self._bridge.tempo_ready.emit(
+                analyse(mix, self.player.samplerate)), daemon=True).start()
+        if self.song.data.get("transpose"):
+            self._set_key(int(self.song.data["transpose"]))
 
     # -- transport ------------------------------------------------------------
     def toggle(self):
@@ -530,7 +645,7 @@ class PlayerWindow(QWidget):
             self.player.pause()
         else:
             self.timeline.follow = True
-            if not self.player.play():
+            if not self.player.play(self._count_in_audio()):
                 QMessageBox.warning(self, "Can't play audio", self.player.error or "")
         self._update_play_icon()
 
@@ -563,6 +678,7 @@ class PlayerWindow(QWidget):
 
     def _selection(self, sel):
         self.loop_btn.setEnabled(sel is not None)
+        self.save_loop_btn.setEnabled(sel is not None)
         sr = self.player.samplerate
         if sel:
             a, b = sel
@@ -587,6 +703,9 @@ class PlayerWindow(QWidget):
 
     def _update_time(self):
         sr = self.player.samplerate
+        if self.player.counting_in:
+            self.time.setText("Count-in…")
+            return
         self.time.setText(f"{fmt_time(self.player.position / sr)} / "
                           f"{fmt_time(self.player.length / sr)}")
 
@@ -603,6 +722,276 @@ class PlayerWindow(QWidget):
         self.scroll.setValue(tl.offset)
         self.scroll.setVisible(tl.max_offset() > 0)
         self.scroll.blockSignals(False)
+
+    # -- practice tools --------------------------------------------------------
+    def _build_practice_bar(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(14, 0, 14, 8)
+        row.setSpacing(6)
+
+        self.tempo_btn = QToolButton()
+        self.tempo_btn.setText("Finding the beat…")
+        self.tempo_btn.setToolTip("Detected tempo. Use the menu to fix half or double "
+                                  "time, beats per bar, or where bar 1 starts.")
+        self.tempo_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.tempo_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        menu = QMenu(self)
+        menu.addAction("Double Tempo (×2)", lambda: self._edit_tempo(scale=2.0))
+        menu.addAction("Halve Tempo (÷2)", lambda: self._edit_tempo(scale=0.5))
+        menu.addSeparator()
+        group = QActionGroup(self)
+        self._bpb_actions = {}
+        for n in (2, 3, 4, 6):
+            act = QAction(f"{n} Beats per Bar", self, checkable=True)
+            act.triggered.connect(lambda _=False, n=n: self._edit_tempo(beats_per_bar=n))
+            group.addAction(act)
+            menu.addAction(act)
+            self._bpb_actions[n] = act
+        menu.addSeparator()
+        menu.addAction("Start Bars One Beat Later", lambda: self._edit_tempo(shift=1))
+        menu.addAction("Start Bars One Beat Earlier", lambda: self._edit_tempo(shift=-1))
+        menu.addSeparator()
+        menu.addAction("Detect Again", self._redetect_tempo)
+        self.tempo_btn.setMenu(menu)
+        self.tempo_btn.setEnabled(False)
+
+        self.snap_btn = QPushButton("Snap to Bars")
+        self.snap_btn.setCheckable(True)
+        self.snap_btn.setChecked(True)
+        self.snap_btn.setToolTip("Selections start and end on bar lines "
+                                 "(hold " + ("⌥" if sys.platform == "darwin" else "Alt")
+                                 + " while dragging to select freely)")
+        self.snap_btn.toggled.connect(lambda v: setattr(self.timeline, "snap_bars", v))
+        self.countin_btn = QPushButton("Count-in")
+        self.countin_btn.setCheckable(True)
+        self.countin_btn.setToolTip("Play one bar of clicks before the music starts (C)")
+        for b in (self.snap_btn, self.countin_btn):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setEnabled(False)
+
+        self.key_down = QToolButton()
+        self.key_down.setText("♭")
+        self.key_down.setToolTip("Transpose down a semitone")
+        self.key_up = QToolButton()
+        self.key_up.setText("♯")
+        self.key_up.setToolTip("Transpose up a semitone. For a song recorded in E♭ tuning, "
+                               "go up one to play along in standard tuning.")
+        self.key_label = QLabel(describe_key(0))
+        self.key_label.setMinimumWidth(110)
+        self.key_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.key_down.clicked.connect(lambda: self._set_key(self.semitones - 1))
+        self.key_up.clicked.connect(lambda: self._set_key(self.semitones + 1))
+        for b in (self.key_down, self.key_up):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            f = b.font()
+            f.setPointSizeF(f.pointSizeF() * 1.3)
+            b.setFont(f)
+            b.setMinimumWidth(30)
+
+        self.loops_box = QComboBox()
+        self.loops_box.setMinimumWidth(170)
+        self.loops_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.loops_box.setToolTip("Your saved loops for this song")
+        self.loops_box.activated.connect(self._loop_chosen)
+        self.save_loop_btn = QPushButton("Save Loop…")
+        self.save_loop_btn.setToolTip("Remember the selected part to practise later")
+        self.save_loop_btn.setEnabled(False)
+        self.save_loop_btn.clicked.connect(self._save_loop)
+        self.loop_menu_btn = QToolButton()
+        self.loop_menu_btn.setText("⋯")
+        self.loop_menu_btn.setToolTip("Rename or delete the chosen loop")
+        self.loop_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        lm = QMenu(self)
+        lm.addAction("Rename Loop…", self._rename_loop)
+        lm.addAction("Delete Loop", self._delete_loop)
+        self.loop_menu_btn.setMenu(lm)
+        for b in (self.save_loop_btn, self.loop_menu_btn):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self.transcribe_btn = QPushButton("Guitar to Tab…")
+        self.transcribe_btn.setToolTip("Write out the guitar part as tab and MIDI")
+        self.transcribe_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.transcribe_btn.clicked.connect(self._transcribe)
+
+        row.addWidget(self.tempo_btn)
+        row.addWidget(self.snap_btn)
+        row.addWidget(self.countin_btn)
+        row.addSpacing(14)
+        row.addWidget(small(secondary(QLabel("Key")), 0.95))
+        row.addWidget(self.key_down)
+        row.addWidget(self.key_label)
+        row.addWidget(self.key_up)
+        row.addSpacing(14)
+        row.addWidget(small(secondary(QLabel("Loops")), 0.95))
+        row.addWidget(self.loops_box)
+        row.addWidget(self.save_loop_btn)
+        row.addWidget(self.loop_menu_btn)
+        row.addStretch(1)
+        row.addWidget(self.transcribe_btn)
+        row.addWidget(self.export_btn)
+        return row
+
+    # tempo
+    def _tempo_ready(self, tempo: Tempo):
+        if tempo is None or len(tempo.beats) < 2:
+            self.tempo_btn.setText("No steady beat found")
+            self.tempo_btn.setEnabled(True)
+            return
+        self.timeline.tempo = tempo
+        self.tempo_btn.setText(f"♩ {tempo.bpm:.0f} BPM · {tempo.beats_per_bar}/4")
+        self.tempo_btn.setEnabled(True)
+        if tempo.beats_per_bar in self._bpb_actions:
+            self._bpb_actions[tempo.beats_per_bar].setChecked(True)
+        self.snap_btn.setEnabled(True)
+        self.countin_btn.setEnabled(True)
+        self.timeline.invalidate()
+
+    def _edit_tempo(self, scale: float | None = None, beats_per_bar: int | None = None,
+                    shift: int = 0):
+        tp = self.timeline.tempo
+        if tp is None:
+            return
+        if scale:
+            tp = tp.scaled(scale)
+        if beats_per_bar:
+            tp = Tempo(tp.bpm, tp.beats, beats_per_bar, tp.bar_offset % beats_per_bar,
+                       tp.confidence)
+        if shift:
+            tp = Tempo(tp.bpm, tp.beats, tp.beats_per_bar,
+                       (tp.bar_offset + shift) % tp.beats_per_bar, tp.confidence)
+        self.song.set("tempo", tp.to_dict())
+        self._tempo_ready(tp)
+
+    def _redetect_tempo(self):
+        self.song.set("tempo", None)
+        self.tempo_btn.setText("Finding the beat…")
+        mix = sum(t.data for t in self.tracks)
+        threading.Thread(target=lambda: self._bridge.tempo_ready.emit(
+            analyse(mix, self.player.samplerate)), daemon=True).start()
+
+    def _count_in_audio(self):
+        tp = self.timeline.tempo
+        if not self.countin_btn.isChecked() or tp is None:
+            return None
+        sr = self.player.samplerate
+        period = tp.beat_period()
+        n = tp.beats_per_bar
+        times = np.arange(n) * period
+        return click_track(times, np.arange(n) == 0, int(round(n * period * sr)), sr)
+
+    # key
+    def _set_key(self, semitones: int):
+        semitones = int(np.clip(semitones, -12, 12))
+        self.semitones = semitones
+        self.key_label.setText("Transposing…" if semitones else describe_key(0))
+        self.key_down.setEnabled(semitones > -12)
+        self.key_up.setEnabled(semitones < 12)
+        self.song.set("transpose", semitones)
+        sr = self.player.samplerate
+        originals = self.originals
+
+        def work():
+            out = [transpose(d, sr, semitones) for d in originals]
+            self._bridge.transposed.emit(semitones, out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _transposed(self, semitones: int, datas):
+        if semitones != self.semitones:
+            return  # the user has already moved on to another key
+        self.player.replace_audio(datas)
+        self.key_label.setText(describe_key(semitones).split(" (")[0])
+        self.key_label.setToolTip(describe_key(semitones))
+
+    # loops
+    def _refresh_loops(self, select: dict | None = None):
+        self.loops_box.blockSignals(True)
+        self.loops_box.clear()
+        if not self.song.loops:
+            self.loops_box.addItem("No saved loops")
+            self.loops_box.setEnabled(False)
+        else:
+            self.loops_box.setEnabled(True)
+            self.loops_box.addItem("Choose a loop…", None)
+            for lp in self.song.loops:
+                self.loops_box.addItem(lp["name"], lp)
+                self.loops_box.setItemData(self.loops_box.count() - 1,
+                                           f"{fmt_time(lp['start'])} to {fmt_time(lp['end'])}",
+                                           Qt.ItemDataRole.ToolTipRole)
+            if select is not None:
+                self.loops_box.setCurrentIndex(self.song.loops.index(select) + 1)
+        self.loops_box.blockSignals(False)
+        self.loop_menu_btn.setEnabled(self._current_loop() is not None)
+        self.timeline.loops = self.song.loops
+        self.timeline.invalidate()
+
+    def _current_loop(self):
+        return self.loops_box.currentData() if self.loops_box.isEnabled() else None
+
+    def _loop_chosen(self, _index: int):
+        loop = self._current_loop()
+        self.loop_menu_btn.setEnabled(loop is not None)
+        if loop:
+            self._use_loop(loop)
+
+    def _use_loop(self, loop: dict):
+        sr = self.player.samplerate
+        sel = (int(loop["start"] * sr), int(loop["end"] * sr))
+        self.timeline.selection = sel
+        self._selection(sel)
+        self.loop_btn.setChecked(True)
+        self._seek(sel[0])
+        tl = self.timeline
+        if not tl.offset <= sel[0] <= tl.offset + tl.width() * tl.spp:
+            tl.set_offset(int(sel[0] - tl.width() * tl.spp * 0.1))
+        if loop in self.song.loops:
+            self.loops_box.setCurrentIndex(self.song.loops.index(loop) + 1)
+            self.loop_menu_btn.setEnabled(True)
+
+    def _default_loop_name(self, a: float, b: float) -> str:
+        tp = self.timeline.tempo
+        if tp is not None and len(tp.beats) > 1:
+            first = int(round(tp.bar_number(a)))
+            last = int(round(tp.bar_number(b))) - 1
+            if last > first:
+                return f"Bars {first} to {last}"
+            return f"Bar {first}"
+        return f"Loop {len(self.song.loops) + 1}"
+
+    def _save_loop(self):
+        sel = self.timeline.selection
+        if not sel:
+            return
+        sr = self.player.samplerate
+        a, b = sel[0] / sr, sel[1] / sr
+        name, ok = QInputDialog.getText(self, "Save Loop", "Name this loop:",
+                                        text=self._default_loop_name(a, b))
+        if ok:
+            loop = self.song.add_loop(name.strip() or self._default_loop_name(a, b), a, b)
+            self._refresh_loops(select=loop)
+
+    def _rename_loop(self):
+        loop = self._current_loop()
+        if not loop:
+            return
+        name, ok = QInputDialog.getText(self, "Rename Loop", "New name:", text=loop["name"])
+        if ok and name.strip():
+            self.song.rename_loop(loop, name.strip())
+            self._refresh_loops(select=loop)
+
+    def _delete_loop(self):
+        loop = self._current_loop()
+        if loop:
+            self.song.remove_loop(loop)
+            self._refresh_loops()
+
+    # transcription
+    def _transcribe(self):
+        from .transcription import TranscriptionWindow
+        idx = next((i for i, t in enumerate(self.tracks) if "guitar" in t.name.lower()), 0)
+        folder = self.tracks[0].path.parent if self.tracks[0].path else None
+        win = TranscriptionWindow(self.originals[idx], self.player.samplerate, self.title,
+                                  self.timeline.tempo, folder, self)
+        win.show()
 
     # -- export ---------------------------------------------------------------
     def export_mix(self):

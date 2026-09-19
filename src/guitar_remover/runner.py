@@ -120,10 +120,11 @@ class Runner(QThread):
         def progress(stage: str, frac: float):
             self.progress.emit(job.id, stage, frac)
 
-        result = self.separator.run(job.src, job.cfg, plan, progress, job.cancel)
+        result = self.separator.run(job.src, job.cfg, plan, progress, job.cancel,
+                                    s.stem_cache())
         # Learn how fast this machine is, for future time estimates.
         cost = preset_cost(job.cfg.shifts, job.cfg.overlap)
-        if result.audio_seconds > 20:
+        if result.audio_seconds > 20 and not result.cached:
             s.record_speed(result.device, job.cfg.model_ref,
                            result.separate_seconds / result.audio_seconds / cost)
         return result

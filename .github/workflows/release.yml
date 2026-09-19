@@ -112,6 +112,8 @@ jobs:
         with:
           path: assets
           merge-multiple: true
+      - name: Checksums (the in-app updater verifies downloads against these)
+        run: cd assets && sha256sum Guitar-Remover-* > SHA256SUMS.txt && cat SHA256SUMS.txt
       - name: Release notes from CHANGELOG.md
         env:
           VERSION: ${{ needs.check.outputs.version }}

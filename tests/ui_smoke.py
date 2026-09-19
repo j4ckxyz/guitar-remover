@@ -104,9 +104,20 @@ def tick():
         pw.grab().save(str(out / f"{scheme}-5-player-loop.png"))
         pw.toggle()
         pw.close()
+        # "Save Again" must reuse the remembered separation.
+        s.set("format", "mp3")
+        s.set("open_player_when_done", False)
+        first = list(win.rows.values())[0]
+        first.again.click()
         state["stage"] = 4
-        QTimer.singleShot(300, win.close)
-        QTimer.singleShot(1500, app.quit)
+    elif st == 4:
+        r = list(win.rows.values())[-1]
+        if r.state in ("done", "failed", "cancelled"):
+            print("save again:", r.state, r.status.text().replace("\n", " | "),
+                  r.result.backing.suffix if r.result else "", flush=True)
+            state["stage"] = 5
+            QTimer.singleShot(300, win.close)
+            QTimer.singleShot(1500, app.quit)
     if time.monotonic() - t0 > 400:
         print("TIMEOUT", flush=True)
         app.quit()
