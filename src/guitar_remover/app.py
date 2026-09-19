@@ -79,6 +79,7 @@ def selftest(song: str, out_dir: str) -> int:
 
 def export_icon(path: str) -> int:
     """Write the app icon as a 1024 px PNG (used by the installers)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # works without a display
     from PySide6.QtGui import QGuiApplication
 
     _app = QGuiApplication(sys.argv[:1])

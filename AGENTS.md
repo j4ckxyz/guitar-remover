@@ -38,8 +38,9 @@ What happens on push (`.github/workflows/release.yml`):
 3. **release**: tag `vX.Y.Z` on the pushed commit, then a GitHub release with the three
    files and the changelog section.
 
-Pull requests run the **check** job only. If a build fails, fix it and push again with
-the **next patch version**, because the failed version may already be recorded in history.
+Pull requests run the **check** job only. If a build fails before the **release** job,
+no tag exists yet, so push the fix with the same version (the check still passes). Once
+`vX.Y.Z` is tagged, every further push needs a higher version.
 
 Enable the hook once per clone: `git config core.hooksPath .githooks`
 

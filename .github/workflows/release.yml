@@ -29,10 +29,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0  # all tags, for the version comparison
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Version must be new and in CHANGELOG.md
@@ -50,7 +50,7 @@ jobs:
     needs: check
     if: github.event_name != 'pull_request'
     strategy:
-      fail-fast: true
+      fail-fast: false  # one broken platform shouldn't hide the others
       matrix:
         include:
           - os: macos-14          # Apple Silicon
@@ -61,8 +61,8 @@ jobs:
             asset: Guitar-Remover-Linux-x86_64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -107,7 +107,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: assets
